@@ -2713,7 +2713,7 @@ function plotterSVG(paths, cfg, aspect) {
 
 const SRC_DEFAULTS = { kind: "model", fit: "cover", mirror: true, cut: 0.06, name: "" };
 
-const BUILD = "v43";
+const BUILD = "v44";
 const MONO = '"IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
 
 /* ============================================================
@@ -2745,7 +2745,15 @@ export default function Glyphworks() {
   const [cloudInfo, setCloudInfo] = useState({ points: 0, voxels: 0, segs: 0 });
   const [modelName, setModelName] = useState("torus knot");
   const [stats, setStats] = useState({ cols: 0, rows: 0, tris: 0, fps: 0 });
-  const [error, setError] = useState("");
+  const [error, setErrorRaw] = useState("");
+  const errorTimer = useRef(null);
+  // Clear itself after a while: a stale banner over the picture reads as a
+  // broken app long after whatever caused it has passed.
+  const setError = useCallback((msg) => {
+    setErrorRaw(msg);
+    if (errorTimer.current) clearTimeout(errorTimer.current);
+    if (msg) errorTimer.current = setTimeout(() => setErrorRaw(""), 12000);
+  }, []);
   const [busy, setBusy] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [recording, setRecording] = useState(false);
@@ -4020,11 +4028,12 @@ export default function Glyphworks() {
       }
       return true;
     } catch (e) {
-      setError(
-        e && e.name === "NotAllowedError"
-          ? "Camera access was denied. Allow it in the address bar, then switch hand control back on."
-          : "Couldn't start the camera: " + ((e && e.message) || e)
-      );
+      if (e && (e.name === "NotAllowedError" || e.name === "SecurityError")) {
+        // The person said no. That is an answer, not an error.
+        flash("Camera off \u2014 hand control needs it");
+      } else {
+        setError("Couldn't start the camera: " + ((e && e.message) || e));
+      }
       setHc((p) => ({ ...p, on: false }));
       return false;
     }
@@ -4094,11 +4103,9 @@ export default function Glyphworks() {
       setSrc((p) => ({ ...p, kind: "camera", name: "camera" }));
       flash("Camera live");
     } catch (e) {
-      setError(
-        e && e.name === "NotAllowedError"
-          ? "Camera access was denied. Allow it in the address bar, then try again."
-          : "Couldn't start the camera: " + ((e && e.message) || e)
-      );
+      if (e && (e.name === "NotAllowedError" || e.name === "SecurityError"))
+        flash("Camera off \u2014 allow it in the address bar to use this");
+      else setError("Couldn't start the camera: " + ((e && e.message) || e));
       setSrc((p) => ({ ...p, kind: "model" }));
     } finally {
       setBusy(false);
