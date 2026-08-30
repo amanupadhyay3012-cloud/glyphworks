@@ -2713,7 +2713,7 @@ function plotterSVG(paths, cfg, aspect) {
 
 const SRC_DEFAULTS = { kind: "model", fit: "cover", mirror: true, cut: 0.06, name: "" };
 
-const BUILD = "v42";
+const BUILD = "v43";
 const MONO = '"IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
 
 /* ============================================================
@@ -4419,7 +4419,9 @@ export default function Glyphworks() {
         typeof VideoFrame === "function" &&
         VideoEncoder.isConfigSupported;
 
+      let encoded = false;
       if (canCodec) {
+       try {
         const config = {
           codec: avcCodec(W, H),
           width: W, height: H,
@@ -4443,6 +4445,8 @@ export default function Glyphworks() {
           error: (e) => (encErr = e),
         });
         encoder.configure(config);
+        // Safari can accept a config and still not reach the configured state.
+        if (encoder.state !== "configured") throw new Error("the encoder would not configure");
 
         const usec = 1000000 / fps;
         const gop = Math.max(1, Math.round(fps * 2));
@@ -4467,7 +4471,15 @@ export default function Glyphworks() {
         const blob = new Blob([mp4], { type: "video/mp4" });
         download(blob, `${modelName}-${sec}-${D}s.mp4`);
         flash(`${(blob.size / 1048576).toFixed(1)} MB \u00b7 ${W}\u00d7${H} \u00b7 ${D}s \u00b7 ${frames} frames \u00b7 MP4`);
-      } else {
+        encoded = true;
+       } catch (codecErr) {
+        console.warn("WebCodecs unavailable, falling back to the recorder:", codecErr);
+        try { if (encoder && encoder.state !== "closed") encoder.close(); } catch {}
+        encoder = null;
+       }
+      }
+
+      if (!encoded) {
         let acc = 0, last = performance.now();
         for (let i = 0; i < 10; i++) { await raf(); const n = performance.now(); acc += n - last; last = n; }
         const refresh = Math.min(240, Math.max(50, Math.round(10000 / acc)));
@@ -4736,8 +4748,11 @@ export default function Glyphworks() {
 canvas.out{display:block;}
 .gl canvas{display:block;width:100%!important;height:100%!important;}
 
-.tabs{display:flex;border:1px solid var(--line2);border-radius:2px;overflow:hidden;}
-.tabs button{font-family:${MONO};font-size:10px;letter-spacing:.08em;text-transform:uppercase;
+.tabs{display:flex;border:1px solid var(--line2);border-radius:2px;
+  flex:0 1 auto;min-width:0;overflow-x:auto;
+  scrollbar-width:none;-webkit-overflow-scrolling:touch;}
+.tabs::-webkit-scrollbar{display:none;}
+.tabs button{flex:0 0 auto;font-family:${MONO};font-size:10px;letter-spacing:.08em;text-transform:uppercase;
   padding:6px 9px;background:var(--sunk);color:var(--dim);border:0;border-right:1px solid var(--line2);cursor:pointer;}
 .tabs button:last-child{border-right:0;}
 .tabs button.on{background:var(--accent);color:#06080C;font-weight:600;}
@@ -4748,7 +4763,11 @@ canvas.out{display:block;}
   font-family:${MONO};font-size:12px;letter-spacing:.1em;text-transform:uppercase;pointer-events:none;}
 
 .timeline{flex:none;display:flex;align-items:center;gap:8px;padding:0 10px;height:40px;
-  border-top:1px solid var(--line);background:var(--panel);}
+  border-top:1px solid var(--line);background:var(--panel);
+  overflow-x:auto;scrollbar-width:none;-webkit-overflow-scrolling:touch;}
+.timeline::-webkit-scrollbar{display:none;}
+.timeline > *{flex:0 0 auto;}
+.timeline .track{flex:1 1 90px;}
 .tbtn{font-family:${MONO};font-size:10px;letter-spacing:.06em;text-transform:uppercase;
   color:var(--text);background:var(--sunk);border:1px solid var(--line2);
   padding:5px 9px;border-radius:2px;cursor:pointer;white-space:nowrap;}
@@ -4763,7 +4782,24 @@ canvas.out{display:block;}
 .clock{font-size:11px;color:var(--dim);min-width:46px;text-align:right;}
 .tseg{margin-bottom:0;}
 .tseg button{padding:5px 7px;}
-@media (max-width:820px){ .timeline{gap:5px;padding:0 6px;} .clock{display:none;} }
+@media (max-width:820px){
+  .timeline{gap:5px;padding:0 6px;}
+  .clock{display:none;}
+  .bar{padding:0 8px;gap:8px;}
+  .rail{max-height:44%;}
+  .stage{min-height:52%;}
+}
+
+/* A phone on its side is wide but very short. Stacking the rail underneath
+   leaves almost no height for the picture, so put it back alongside. */
+@media (orientation:landscape) and (max-height:600px){
+  .body{flex-direction:row;}
+  .rail{width:min(46%,320px);max-height:none;border-top:0;border-left:1px solid var(--line);}
+  .stage{min-height:0;}
+  .bar{height:42px;}
+  .timeline{height:38px;}
+  .status{height:26px;}
+}
 
 .status{flex:none;height:28px;display:flex;align-items:center;gap:0;
   border-top:1px solid var(--line);background:var(--panel);font-family:${MONO};font-size:10.5px;color:var(--dim);}
