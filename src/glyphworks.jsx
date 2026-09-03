@@ -788,7 +788,126 @@ const ANIM = {
   points: { num: ["size","opacity","scatter","zoom","scale","height"], col: ["bg"] },
   voxel:  { num: ["scatter","ambient","key","zoom","scale","height"], col: ["bg"] },
   wire:   { num: ["opacity","fog","zoom","scale","height"], col: ["color","bg"] },
+  studio: { num: ["key","fill","rim","keyAngle","exposure","envPower","roughness","metalness","shadow","zoom","scale","height"], col: ["tint","bg"] },
 };
+
+/* ============================================================
+   Motion presets — one tap writes a finished set of keyframes.
+   The timeline was always capable of this; what it lacked was a way
+   in for someone who does not want to learn keyframing.
+   ============================================================ */
+
+const MOTIONS = [
+  ["turntable", "Turntable", "One clean revolution, looping seamlessly."],
+  ["assemble", "Assemble", "Comes together from nothing."],
+  ["dissolve", "Dissolve", "Falls apart and drifts away."],
+  ["pushin", "Push in", "Slow dolly toward the model."],
+  ["resolve", "Resolve", "Coarse to sharp, like an image loading."],
+  ["pulse", "Pulse", "Breathes in and out on a loop."],
+  ["reveal", "Reveal", "Fades up while it turns."],
+  ["sweep", "Sweep", "The light travels around it."],
+];
+
+// Presets describe *changes*; anything a section does not have is skipped, so
+// the same preset works whether it lands on points, glyphs or a lit render.
+function buildMotion(kind, sec, cfg, orbit, D) {
+  const spec = ANIM[sec];
+  if (!spec) return null;
+  const base = { yaw: orbit.yaw, pitch: orbit.pitch };
+  for (const k of spec.num) if (k in cfg) base[k] = cfg[k];
+  for (const k of spec.col) if (k in cfg) base[k] = cfg[k];
+
+  const has = (k) => k in base;
+  const at = (f, over) => {
+    const snap = { ...base };
+    for (const k in over) if (k === "yaw" || k === "pitch" || has(k)) snap[k] = over[k];
+    return { t: +(f * D).toFixed(3), snap };
+  };
+  const turn = (f) => orbit.yaw + Math.PI * 2 * f;
+
+  // whichever of these the section owns becomes the "amount of nothing" knob
+  const emptyKey = has("scatter") ? "scatter" : has("opacity") ? "opacity" : has("detail") ? "detail" : has("res") ? "res" : null;
+  const emptyVal = has("scatter") ? 1.2 : has("opacity") ? 0.02 : has("detail") ? 26 : has("res") ? 34 : null;
+  const fullVal = emptyKey ? base[emptyKey] : null;
+
+  switch (kind) {
+    case "turntable":
+      return [at(0, { yaw: turn(0) }), at(0.5, { yaw: turn(0.5) }), at(1, { yaw: turn(1) })];
+
+    case "assemble":
+      if (!emptyKey) return null;
+      return [
+        at(0, { yaw: turn(0), [emptyKey]: emptyVal }),
+        at(0.7, { yaw: turn(0.7), [emptyKey]: fullVal }),
+        at(1, { yaw: turn(1), [emptyKey]: fullVal }),
+      ];
+
+    case "dissolve":
+      if (!emptyKey) return null;
+      return [
+        at(0, { yaw: turn(0), [emptyKey]: fullVal }),
+        at(0.35, { yaw: turn(0.35), [emptyKey]: fullVal }),
+        at(1, { yaw: turn(1), [emptyKey]: emptyVal }),
+      ];
+
+    case "pushin": {
+      const far = has("zoom") ? base.zoom * 1.6 : null;
+      const near = has("zoom") ? base.zoom * 0.72 : null;
+      return [
+        at(0, { yaw: turn(0), zoom: far }),
+        at(1, { yaw: turn(0.35), zoom: near }),
+      ];
+    }
+
+    case "resolve": {
+      const k = has("detail") ? "detail" : has("res") ? "res" : has("size") ? "size" : null;
+      if (!k) return null;
+      const coarse = k === "size" ? base[k] * 3 : Math.max(20, base[k] * 0.18);
+      return [
+        at(0, { yaw: turn(0), [k]: coarse }),
+        at(0.75, { yaw: turn(0.75), [k]: base[k] }),
+        at(1, { yaw: turn(1), [k]: base[k] }),
+      ];
+    }
+
+    case "pulse":
+      if (!has("scale")) return null;
+      return [
+        at(0, { yaw: turn(0), scale: base.scale }),
+        at(0.5, { yaw: turn(0.5), scale: base.scale * 1.28 }),
+        at(1, { yaw: turn(1), scale: base.scale }),
+      ];
+
+    case "reveal": {
+      const k = has("opacity") ? "opacity" : has("scatter") ? "scatter" : null;
+      const from = k === "opacity" ? 0.02 : k === "scatter" ? 0.9 : null;
+      return [
+        at(0, { yaw: turn(0), zoom: has("zoom") ? base.zoom * 1.25 : null, [k]: from }),
+        at(0.6, { yaw: turn(0.6), zoom: base.zoom, [k]: k ? base[k] : null }),
+        at(1, { yaw: turn(1), zoom: base.zoom, [k]: k ? base[k] : null }),
+      ];
+    }
+
+    case "sweep": {
+      if (!has("keyAngle")) {
+        // no light to move, so move the camera instead
+        return [
+          at(0, { yaw: turn(0), pitch: orbit.pitch - 0.35 }),
+          at(0.5, { yaw: turn(0.5), pitch: orbit.pitch + 0.35 }),
+          at(1, { yaw: turn(1), pitch: orbit.pitch - 0.35 }),
+        ];
+      }
+      return [
+        at(0, { keyAngle: 0 }),
+        at(0.5, { keyAngle: 180 }),
+        at(1, { keyAngle: 360 }),
+      ];
+    }
+
+    default:
+      return null;
+  }
+}
 
 const EASE = {
   linear: (t) => t,
@@ -2819,7 +2938,7 @@ function applyStudio(E, cfg) {
 
 const SRC_DEFAULTS = { kind: "model", fit: "cover", mirror: true, cut: 0.06, name: "" };
 
-const BUILD = "v45 · studio";
+const BUILD = "v46 · motion";
 const MONO = '"IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
 
 /* ============================================================
@@ -3411,6 +3530,27 @@ export default function Glyphworks() {
       if (a.snap[k] !== undefined && b.snap[k] !== undefined) next[k] = lerpHex(a.snap[k], b.snap[k], f);
     cfgRef.current = next;
   }, [sectionKeys]);
+
+  const applyMotion = useCallback((kind) => {
+    const sec = sectionRef.current;
+    const cfg = refFor(sec).current;
+    const D = tlRef.current.duration;
+    const keys = buildMotion(kind, sec, cfg, orbit.current, D);
+    if (!keys) { flash("That one needs a control this mode does not have"); return; }
+    setTl((p) => ({
+      ...p,
+      loop: true,
+      keys: [
+        ...p.keys.filter((k) => k.section !== sec),
+        ...keys.map((k, i) => ({ id: Date.now() + i, t: k.t, section: sec, snap: k.snap })),
+      ],
+    }));
+    play.current.t = 0;
+    play.current.baseYaw = orbit.current.yaw;
+    play.current.on = true;
+    setPlaying(true);
+    flash(kind + " \u00b7 " + D + "s loop");
+  }, []);
 
   const addKey = useCallback(() => {
     const sec = sectionRef.current;
@@ -4884,6 +5024,31 @@ export default function Glyphworks() {
 
   const ramp = (s.ramp === "custom" ? s.custom : RAMPS[s.ramp]) || RAMPS.standard;
 
+  const MotionPanel = () => (
+    <div className="grp">
+      <h3>Motion</h3>
+      <div className="chips">
+        {MOTIONS.map(([k, l]) => (
+          <button key={k} className="chip" onClick={() => applyMotion(k)}>{l}</button>
+        ))}
+      </div>
+      <div className="seg" style={{ marginTop: 8 }}>
+        {[5, 10, 15].map((d) => (
+          <button key={d} className={tl.duration === d ? "on" : ""} onClick={() => setTl((p) => ({ ...p, duration: d }))}>{d}s</button>
+        ))}
+      </div>
+      <button className="btn" style={{ width: "100%" }}
+        onClick={() => { play.current.on = false; setPlaying(false); setTl((p) => ({ ...p, keys: p.keys.filter((k) => k.section !== section) })); syncBack(); }}>
+        Clear motion
+      </button>
+      <p className="hint">
+        One tap writes a whole animation and starts it playing. Every preset is built to loop, so
+        recording gives you a clip that repeats without a seam. Adjust anything afterwards and press
+        <b> + Key</b> on the timeline to keep the change.
+      </p>
+    </div>
+  );
+
   const HandPanel = () => (
     <div className="grp">
       <h3>Hand control</h3>
@@ -5345,6 +5510,7 @@ input[type=range]:focus-visible{outline:1px solid var(--accent);outline-offset:4
 
         {panelOpen && section === "points" && (
           <div className="rail">
+            <MotionPanel />
             <HandPanel />
             <div className="grp">
               <h3>Source</h3>
@@ -5454,6 +5620,7 @@ input[type=range]:focus-visible{outline:1px solid var(--accent);outline-offset:4
 
         {panelOpen && section === "studio" && (
           <div className="rail">
+            <MotionPanel />
             <HandPanel />
 
             <div className="grp">
@@ -5903,6 +6070,7 @@ input[type=range]:focus-visible{outline:1px solid var(--accent);outline-offset:4
 
         {panelOpen && section === "dither" && (
           <div className="rail">
+            <MotionPanel />
             {mediaOn && (
               <div className="grp">
                 <h3>Source</h3>
@@ -6021,6 +6189,7 @@ input[type=range]:focus-visible{outline:1px solid var(--accent);outline-offset:4
 
         {panelOpen && section === "voxel" && (
           <div className="rail">
+            <MotionPanel />
             <HandPanel />
             <div className="grp">
               <h3>Grid</h3>
@@ -6092,6 +6261,7 @@ input[type=range]:focus-visible{outline:1px solid var(--accent);outline-offset:4
 
         {panelOpen && section === "wire" && (
           <div className="rail">
+            <MotionPanel />
             <HandPanel />
             <div className="grp">
               <h3>Edges</h3>
@@ -6199,6 +6369,7 @@ input[type=range]:focus-visible{outline:1px solid var(--accent);outline-offset:4
 
         {panelOpen && section === "ascii" && (
           <div className="rail">
+            <MotionPanel />
             <HandPanel />
             {mediaOn && (
               <div className="grp">
