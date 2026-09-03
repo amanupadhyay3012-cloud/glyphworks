@@ -3,12 +3,6 @@ import * as THREE from "three";
 import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import { FontLoader } from "three/examples/jsm/loaders/FontLoader.js";
 import { TextGeometry } from "three/examples/jsm/geometries/TextGeometry.js";
-import helvetiker from "three/examples/fonts/helvetiker_regular.typeface.json";
-import helvetikerBold from "three/examples/fonts/helvetiker_bold.typeface.json";
-import optimer from "three/examples/fonts/optimer_regular.typeface.json";
-import optimerBold from "three/examples/fonts/optimer_bold.typeface.json";
-import gentilis from "three/examples/fonts/gentilis_regular.typeface.json";
-import gentilisBold from "three/examples/fonts/gentilis_bold.typeface.json";
 
 /* ============================================================
    GLB parsing — self-contained. No GLTFLoader dependency.
@@ -2952,13 +2946,16 @@ function applyStudio(E, cfg) {
    needs to know it was text.
    ============================================================ */
 
+// Served as plain files from public/ rather than imported. The production
+// bundler will not resolve JSON out of three's package, and a font is data,
+// not code — it has no business being in the bundle anyway.
 const FONTS = {
-  helvetiker: ["Helvetiker", helvetiker],
-  "helvetiker bold": ["Helvetiker Bold", helvetikerBold],
-  optimer: ["Optimer", optimer],
-  "optimer bold": ["Optimer Bold", optimerBold],
-  gentilis: ["Gentilis", gentilis],
-  "gentilis bold": ["Gentilis Bold", gentilisBold],
+  helvetiker: ["Helvetiker", "helvetiker_regular"],
+  "helvetiker bold": ["Helvetiker Bold", "helvetiker_bold"],
+  optimer: ["Optimer", "optimer_regular"],
+  "optimer bold": ["Optimer Bold", "optimer_bold"],
+  gentilis: ["Gentilis", "gentilis_regular"],
+  "gentilis bold": ["Gentilis Bold", "gentilis_bold"],
 };
 
 const TX_DEFAULTS = {
@@ -2988,18 +2985,29 @@ const TX_DEFAULTS = {
 };
 
 const fontCache = new Map();
+const fontPending = new Map();
 function loadFont(key) {
-  if (fontCache.has(key)) return fontCache.get(key);
+  if (fontCache.has(key)) return Promise.resolve(fontCache.get(key));
+  if (fontPending.has(key)) return fontPending.get(key);
   const entry = FONTS[key] || FONTS.helvetiker;
-  const font = new FontLoader().parse(entry[1]);
-  fontCache.set(key, font);
-  return font;
+  const job = fetch(`${import.meta.env.BASE_URL}fonts/${entry[1]}.typeface.json`)
+    .then((r) => {
+      if (!r.ok) throw new Error(`font ${entry[1]} is missing from public/fonts`);
+      return r.json();
+    })
+    .then((json) => {
+      const font = new FontLoader().parse(json);
+      fontCache.set(key, font);
+      fontPending.delete(key);
+      return font;
+    });
+  fontPending.set(key, job);
+  return job;
 }
 
 // One geometry per line, so letter spacing and line height can be controlled
 // directly rather than being whatever the font happens to specify.
-function buildText(cfg) {
-  const font = loadFont(cfg.font);
+function buildText(cfg, font) {
   const lines = String(cfg.text || " ").split("\n");
   const group = new THREE.Group();
   const size = 1;
@@ -3061,7 +3069,7 @@ function buildText(cfg) {
 
 const SRC_DEFAULTS = { kind: "model", fit: "cover", mirror: true, cut: 0.06, name: "" };
 
-const BUILD = "v47 · text";
+const BUILD = "v47.1 · text";
 const MONO = '"IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
 
 /* ============================================================
@@ -3982,11 +3990,18 @@ export default function Glyphworks() {
     applyStudio(engine.current, st);
   }, [section, modelName, st.material, st.tint, st.roughness, st.metalness, st.envPower, st.env]);
 
-  const rebuildText = useCallback(() => {
+  const rebuildText = useCallback(async () => {
     const E = engine.current;
     const cfg = txRef.current;
     let built = null;
-    try { built = buildText(cfg); } catch (e) { console.error("Text build failed:", e); }
+    try {
+      const font = await loadFont(cfg.font);
+      built = buildText(cfg, font);
+    } catch (e) {
+      console.error("Text build failed:", e);
+      setError("Couldn't build the text: " + ((e && e.message) || e));
+      return;
+    }
     if (!built) { setError("Nothing to build \u2014 type something first."); return; }
     // dropped in as the scene's model, so points, voxels, wire and the plotter
     // all treat it as geometry with no special cases
@@ -5867,7 +5882,9 @@ input[type=range]:focus-visible{outline:1px solid var(--accent);outline-offset:4
                   <button key={k} className={tx.align === k ? "on" : ""} onClick={() => setTx("align", k)}>{l}</button>
                 ))}
               </div>
-              <p className="hint">Press Enter for a new line. It rebuilds a moment after you stop typing.</p>
+              <p className="hint">
+                Press Enter for a new line. It rebuilds a moment after you stop typing.
+              </p>
             </div>
 
             <div className="grp">
