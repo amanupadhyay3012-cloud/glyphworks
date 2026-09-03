@@ -1,6 +1,14 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import * as THREE from "three";
 import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
+import { FontLoader } from "three/examples/jsm/loaders/FontLoader.js";
+import { TextGeometry } from "three/examples/jsm/geometries/TextGeometry.js";
+import helvetiker from "three/examples/fonts/helvetiker_regular.typeface.json";
+import helvetikerBold from "three/examples/fonts/helvetiker_bold.typeface.json";
+import optimer from "three/examples/fonts/optimer_regular.typeface.json";
+import optimerBold from "three/examples/fonts/optimer_bold.typeface.json";
+import gentilis from "three/examples/fonts/gentilis_regular.typeface.json";
+import gentilisBold from "three/examples/fonts/gentilis_bold.typeface.json";
 
 /* ============================================================
    GLB parsing — self-contained. No GLTFLoader dependency.
@@ -789,6 +797,7 @@ const ANIM = {
   voxel:  { num: ["scatter","ambient","key","zoom","scale","height"], col: ["bg"] },
   wire:   { num: ["opacity","fog","zoom","scale","height"], col: ["color","bg"] },
   studio: { num: ["key","fill","rim","keyAngle","exposure","envPower","roughness","metalness","shadow","zoom","scale","height"], col: ["tint","bg"] },
+  text:   { num: ["key","fill","rim","keyAngle","exposure","envPower","shadow","zoom","scale","height"], col: ["tint","bg"] },
 };
 
 /* ============================================================
@@ -2936,9 +2945,123 @@ function applyStudio(E, cfg) {
   });
 }
 
+
+/* ============================================================
+   Text — typed words become real geometry, which every other mode
+   then treats exactly like an uploaded model. Nothing downstream
+   needs to know it was text.
+   ============================================================ */
+
+const FONTS = {
+  helvetiker: ["Helvetiker", helvetiker],
+  "helvetiker bold": ["Helvetiker Bold", helvetikerBold],
+  optimer: ["Optimer", optimer],
+  "optimer bold": ["Optimer Bold", optimerBold],
+  gentilis: ["Gentilis", gentilis],
+  "gentilis bold": ["Gentilis Bold", gentilisBold],
+};
+
+const TX_DEFAULTS = {
+  text: "GLYPH\nWORKS",
+  font: "helvetiker bold",
+  depth: 0.28,
+  bevel: 0.02,
+  spacing: 0,
+  lineHeight: 1.15,
+  curve: 6,
+  align: "center",
+  material: "clay",
+  tint: "#D9DEE6",
+  bg: "#0A0C10",
+  key: 2.2,
+  fill: 0.5,
+  rim: 1.6,
+  keyAngle: 40,
+  shadow: 0.45,
+  exposure: 1,
+  tone: "aces",
+  envPower: 1,
+  spin: 0.25,
+  zoom: 4.4,
+  scale: 1,
+  height: 0,
+};
+
+const fontCache = new Map();
+function loadFont(key) {
+  if (fontCache.has(key)) return fontCache.get(key);
+  const entry = FONTS[key] || FONTS.helvetiker;
+  const font = new FontLoader().parse(entry[1]);
+  fontCache.set(key, font);
+  return font;
+}
+
+// One geometry per line, so letter spacing and line height can be controlled
+// directly rather than being whatever the font happens to specify.
+function buildText(cfg) {
+  const font = loadFont(cfg.font);
+  const lines = String(cfg.text || " ").split("\n");
+  const group = new THREE.Group();
+  const size = 1;
+  const made = [];
+
+  lines.forEach((line) => {
+    if (!line.trim()) { made.push(null); return; }
+    const parts = [];
+    let cursor = 0;
+    for (const ch of line) {
+      if (ch === " ") { cursor += size * 0.34 + cfg.spacing; continue; }
+      let g;
+      try {
+        g = new TextGeometry(ch, {
+          font, size,
+          height: Math.max(0.001, cfg.depth),
+          depth: Math.max(0.001, cfg.depth),
+          curveSegments: Math.max(1, Math.round(cfg.curve)),
+          bevelEnabled: cfg.bevel > 0.002,
+          bevelThickness: cfg.bevel,
+          bevelSize: cfg.bevel * 0.7,
+          bevelSegments: 2,
+        });
+      } catch { continue; }
+      g.computeBoundingBox();
+      const w = g.boundingBox ? g.boundingBox.max.x - g.boundingBox.min.x : size * 0.6;
+      g.translate(cursor, 0, 0);
+      parts.push(g);
+      cursor += w + size * 0.06 + cfg.spacing;
+    }
+    made.push({ parts, width: cursor });
+  });
+
+  const widest = Math.max(0.001, ...made.map((m) => (m ? m.width : 0)));
+  const lineStep = size * cfg.lineHeight * 1.35;
+  made.forEach((m, i) => {
+    if (!m) return;
+    const shift =
+      cfg.align === "left" ? 0 : cfg.align === "right" ? widest - m.width : (widest - m.width) / 2;
+    const y = -i * lineStep;
+    m.parts.forEach((g) => {
+      g.translate(shift - widest / 2, y, 0);
+      const mesh = new THREE.Mesh(g, new THREE.MeshStandardMaterial({ color: 0xffffff, side: THREE.DoubleSide }));
+      mesh.userData.info = null;
+      group.add(mesh);
+    });
+  });
+
+  if (!group.children.length) return null;
+  let tris = 0;
+  group.traverse((o) => {
+    if (o.isMesh && o.geometry) {
+      const pos = o.geometry.attributes.position;
+      tris += (o.geometry.index ? o.geometry.index.count : pos.count) / 3;
+    }
+  });
+  return { group: fitToUnitBox(group), tris: Math.round(tris) };
+}
+
 const SRC_DEFAULTS = { kind: "model", fit: "cover", mirror: true, cut: 0.06, name: "" };
 
-const BUILD = "v46 · motion";
+const BUILD = "v47 · text";
 const MONO = '"IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
 
 /* ============================================================
@@ -2961,6 +3084,7 @@ export default function Glyphworks() {
   const [hc, setHc] = useState(HC_DEFAULTS);
   const [plot, setPlot] = useState(PLOT_DEFAULTS);
   const [st, setSt] = useState(ST_DEFAULTS);
+  const [tx, setTxRaw] = useState(TX_DEFAULTS);
   const [plotInfo, setPlotInfo] = useState(null);
   const [handSeen, setHandSeen] = useState(false);
   const [handStatus, setHandStatus] = useState("idle");
@@ -2998,6 +3122,7 @@ export default function Glyphworks() {
   const srcRef = useRef(src);
   const hcRef = useRef(hc);
   const stRef = useRef(st);
+  const txRef = useRef(tx);
   const handCvRef = useRef(null);
   const mdRef = useRef(md);
   const clRef = useRef(cl);
@@ -3036,6 +3161,7 @@ export default function Glyphworks() {
   srcRef.current = src;
   hcRef.current = hc;
   stRef.current = st;
+  txRef.current = tx;
   mdRef.current = md;
   clRef.current = cl;
 
@@ -3057,13 +3183,14 @@ export default function Glyphworks() {
   const setH = (k, v) => setHc((p) => ({ ...p, [k]: v }));
   const setPl = (k, v) => setPlot((p) => ({ ...p, [k]: v }));
   const setSt2 = (k, v) => setSt((p) => ({ ...p, [k]: v }));
+  const setTx = (k, v) => setTxRaw((p) => ({ ...p, [k]: v }));
   const setC = (k, v) => setCl((p) => ({ ...p, [k]: v }));
   const refFor = (sec) =>
     sec === "ascii" ? sRef : sec === "dither" ? dtRef : sec === "points" ? pcRef : sec === "voxel" ? vxRef : wfRef;
   const setterFor = (sec) =>
     sec === "ascii" ? setS : sec === "dither" ? setDt : sec === "points" ? setPc : sec === "voxel" ? setVx : setWf;
   const cfgFor = (sec) =>
-    sec === "points" ? pcRef.current : sec === "voxel" ? vxRef.current : sec === "wire" ? wfRef.current : sec === "studio" ? stRef.current : dtRef.current;
+    sec === "points" ? pcRef.current : sec === "voxel" ? vxRef.current : sec === "wire" ? wfRef.current : sec === "studio" ? stRef.current : sec === "text" ? txRef.current : dtRef.current;
 
   const flash = (msg) => {
     setToast(msg);
@@ -3188,7 +3315,8 @@ export default function Glyphworks() {
         const spin = sec === "ascii" ? sRef.current.spin : cfgFor(sec).spin;
         if (!orbit.current.dragging) orbit.current.yaw += spin * dt;
       }
-      if (sec === "studio") drawStudio();
+      if (sec === "text") drawText();
+      else if (sec === "studio") drawStudio();
       else if (sec === "collage") drawCollage();
       else if (sec === "media") drawMedia();
       else if (sec === "ascii") draw(dt);
@@ -3835,6 +3963,7 @@ export default function Glyphworks() {
       if (E.wire) E.wire.visible = false;
       E.vw = 0;
     } else {
+      if (section === "text") return;
       E.scene.environment = null;
       E.scene.background = null;
       E.renderer.toneMapping = THREE.NoToneMapping;
@@ -3852,6 +3981,91 @@ export default function Glyphworks() {
     if (section !== "studio") return;
     applyStudio(engine.current, st);
   }, [section, modelName, st.material, st.tint, st.roughness, st.metalness, st.envPower, st.env]);
+
+  const rebuildText = useCallback(() => {
+    const E = engine.current;
+    const cfg = txRef.current;
+    let built = null;
+    try { built = buildText(cfg); } catch (e) { console.error("Text build failed:", e); }
+    if (!built) { setError("Nothing to build \u2014 type something first."); return; }
+    // dropped in as the scene's model, so points, voxels, wire and the plotter
+    // all treat it as geometry with no special cases
+    swap(built, cfg.text.replace(/\s+/g, " ").trim().slice(0, 24) || "text");
+    if (E.points) { E.pivot.remove(E.points); E.points.geometry.dispose(); E.points.material.dispose(); E.points = null; }
+    if (E.voxels) { E.pivot.remove(E.voxels); E.voxels.geometry.dispose(); E.voxels.material.dispose(); E.voxels = null; }
+    if (E.wire) { E.pivot.remove(E.wire); disposeWire(E.wire); E.wire = null; }
+  }, []);
+
+  const drawText = useCallback(() => {
+    const E = engine.current, host = viewRef.current;
+    if (!E || !host) return;
+    const cfg = txRef.current;
+    const W = host.clientWidth, H = host.clientHeight;
+    if (W < 8 || H < 8) return;
+    if (E.vw !== W || E.vh !== H || E.capApplied !== E.cap) {
+      E.capApplied = E.cap;
+      if (E.cap) {
+        let pw = Math.floor(W * E.cap), ph = Math.floor(H * E.cap);
+        pw -= pw % 2; ph -= ph % 2;
+        E.renderer.setPixelRatio(1);
+        E.renderer.setSize(pw, ph, false);
+      } else {
+        E.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+        E.renderer.setSize(W, H, false);
+      }
+      E.vw = W; E.vh = H;
+    }
+    E.scene.environment = studioEnv(E);
+    E.scene.background = null;
+    E.renderer.toneMapping =
+      cfg.tone === "aces" ? THREE.ACESFilmicToneMapping :
+      cfg.tone === "reinhard" ? THREE.ReinhardToneMapping :
+      cfg.tone === "cineon" ? THREE.CineonToneMapping : THREE.NoToneMapping;
+    E.renderer.toneMappingExposure = cfg.exposure;
+    E.renderer.setClearColor(new THREE.Color(E.bgOver || cfg.bg), E.alpha ? 0 : 1);
+    E.ambient.intensity = 0; E.key.intensity = 0; E.fill.intensity = 0;
+    const a = (cfg.keyAngle * Math.PI) / 180;
+    E.stKey.intensity = cfg.key;
+    E.stKey.position.set(Math.cos(a) * 5, 4.5, Math.sin(a) * 5);
+    E.stFill.intensity = cfg.fill;
+    E.stFill.position.set(-Math.cos(a) * 4, 1.5, -Math.sin(a) * 3);
+    E.stRim.intensity = cfg.rim;
+    E.stRim.position.set(-Math.cos(a) * 3, 2.5, -Math.sin(a) * 6);
+    E.floor.visible = cfg.shadow > 0.01;
+    E.floor.material.opacity = cfg.shadow;
+    E.floor.position.y = -1.05 * cfg.scale + cfg.height;
+    E.pivot.rotation.set(orbit.current.pitch, orbit.current.yaw, 0);
+    E.pivot.scale.setScalar(cfg.scale);
+    E.pivot.position.y = cfg.height;
+    E.camera.aspect = W / H;
+    E.camera.position.set(0, 0.2, cfg.zoom);
+    E.camera.lookAt(0, 0, 0);
+    E.camera.updateProjectionMatrix();
+    E.scene.fog = null;
+    E.scene.overrideMaterial = null;
+    E.renderer.setRenderTarget(null);
+    E.renderer.render(E.scene, E.camera);
+  }, []);
+
+  // rebuild when the wording or shape changes, not on every keystroke
+  useEffect(() => {
+    if (section !== "text") return;
+    const id = setTimeout(rebuildText, 280);
+    return () => clearTimeout(id);
+  }, [section, tx.text, tx.font, tx.depth, tx.bevel, tx.spacing, tx.lineHeight, tx.curve, tx.align, rebuildText]);
+
+  useEffect(() => {
+    const E = engine.current;
+    if (!E) return;
+    if (section === "text") {
+      if (E.content) { E.content.visible = true; applyStudio(E, { ...txRef.current, material: txRef.current.material, roughness: 0.4, metalness: 0.05 }); }
+      if (E.points) E.points.visible = false;
+      if (E.mpts) E.mpts.visible = false;
+      if (E.voxels) E.voxels.visible = false;
+      if (E.wire) E.wire.visible = false;
+      E.vw = 0;
+    }
+  }, [section, tx.material, tx.tint, tx.envPower, modelName]);
 
   /* ---- point cloud ---- */
   const draw3D = useCallback((cfg, kind) => {
@@ -4558,6 +4772,7 @@ export default function Glyphworks() {
       else if (sec === "voxel") setVx(upd);
       else if (sec === "wire") setWf(upd);
       else if (sec === "studio") setSt(upd);
+      else if (sec === "text") setTxRaw(upd);
       else if (sec === "dither") setDt(upd);
       else if (sec === "media") {
         setMd((p) => ({ ...p, zoom: Math.min(8, Math.max(0.15, p.zoom * (1 - e.deltaY * 0.0015))) }));
@@ -4739,7 +4954,8 @@ export default function Glyphworks() {
 
   const renderAt = (t, sec) => {
     applyTime(t);
-    if (sec === "studio") drawStudio();
+    if (sec === "text") drawText();
+    else if (sec === "studio") drawStudio();
     else if (sec === "collage") drawCollage();
     else if (sec === "media") drawMedia();
     else if (sec === "ascii") draw(0);
@@ -5290,7 +5506,7 @@ input[type=range]:focus-visible{outline:1px solid var(--accent);outline-offset:4
       <div className="bar">
         <div className="mark">GLYPH<span>WORKS</span></div>
         <div className="tabs">
-          {[["studio", "Studio"], ["media", "Media"], ["collage", "Collage"], ["ascii", "ASCII"], ["dither", "Dither"], ["points", "Points"], ["voxel", "Voxel"], ["wire", "Wire"]].map(([k, l]) => (
+          {[["text", "Text"], ["studio", "Studio"], ["media", "Media"], ["collage", "Collage"], ["ascii", "ASCII"], ["dither", "Dither"], ["points", "Points"], ["voxel", "Voxel"], ["wire", "Wire"]].map(([k, l]) => (
             <button key={k} className={section === k ? "on" : ""} onClick={() => setSection(k)}>{l}</button>
           ))}
         </div>
@@ -5614,6 +5830,118 @@ input[type=range]:focus-visible{outline:1px solid var(--accent);outline-offset:4
                 </button>
               </div>
               <p className="hint">PLY opens in Blender, CloudCompare, MeshLab, and Houdini.</p>
+            </div>
+          </div>
+        )}
+
+        {panelOpen && section === "text" && (
+          <div className="rail">
+            <MotionPanel />
+            <HandPanel />
+
+            <div className="grp">
+              <h3>Words</h3>
+              <textarea
+                value={tx.text}
+                onChange={(e) => setTx("text", e.target.value)}
+                spellCheck={false}
+                rows={3}
+                style={{
+                  width: "100%", resize: "vertical", minHeight: 62,
+                  fontFamily: MONO, fontSize: 13, lineHeight: 1.5,
+                  color: "var(--text)", background: "var(--sunk)",
+                  border: "1px solid var(--line2)", borderRadius: 3,
+                  padding: "8px 10px", outline: "none", marginBottom: 10,
+                }}
+                aria-label="Text to build"
+              />
+              <div className="chips">
+                {Object.keys(FONTS).map((k) => (
+                  <button key={k} className={"chip" + (tx.font === k ? " on" : "")} onClick={() => setTx("font", k)}>
+                    {FONTS[k][0]}
+                  </button>
+                ))}
+              </div>
+              <div className="seg">
+                {[["left", "Left"], ["center", "Centre"], ["right", "Right"]].map(([k, l]) => (
+                  <button key={k} className={tx.align === k ? "on" : ""} onClick={() => setTx("align", k)}>{l}</button>
+                ))}
+              </div>
+              <p className="hint">Press Enter for a new line. It rebuilds a moment after you stop typing.</p>
+            </div>
+
+            <div className="grp">
+              <h3>Shape</h3>
+              <Slide label="Depth" v={tx.depth} min={0.001} max={1.2} step={0.005}
+                fmt={(v) => (v < 0.01 ? "flat" : v.toFixed(2))} on={(v) => setTx("depth", v)} />
+              <Slide label="Bevel" v={tx.bevel} min={0} max={0.12} step={0.002}
+                fmt={(v) => (v < 0.003 ? "none" : v.toFixed(3))} on={(v) => setTx("bevel", v)} />
+              <Slide label="Letter spacing" v={tx.spacing} min={-0.15} max={0.6} step={0.01} on={(v) => setTx("spacing", v)} />
+              <Slide label="Line height" v={tx.lineHeight} min={0.7} max={2.2} step={0.01} on={(v) => setTx("lineHeight", v)} />
+              <Slide label="Smoothness" v={tx.curve} min={1} max={14} step={1} fmt={(v) => v.toFixed(0)} on={(v) => setTx("curve", v)} />
+              <p className="hint">
+                Pull depth to zero for flat lettering. Smoothness costs triangles, so keep it low
+                if you are heading to Voxel or the plotter.
+              </p>
+            </div>
+
+            <div className="grp">
+              <h3>Surface</h3>
+              <div className="chips">
+                {MATERIALS.filter(([k]) => k !== "original").map(([k, l]) => (
+                  <button key={k} className={"chip" + (tx.material === k ? " on" : "")} onClick={() => setTx("material", k)}>{l}</button>
+                ))}
+              </div>
+              <div className="swatches">
+                <Swatch label="Colour" value={tx.tint} on={(v) => setTx("tint", v)} />
+                <Swatch label="Field" value={tx.bg} on={(v) => setTx("bg", v)} />
+              </div>
+              <Slide label="Environment" v={tx.envPower} min={0} max={3} step={0.01} on={(v) => setTx("envPower", v)} />
+            </div>
+
+            <div className="grp">
+              <h3>Light</h3>
+              <Slide label="Key" v={tx.key} min={0} max={6} step={0.01} on={(v) => setTx("key", v)} />
+              <Slide label="Fill" v={tx.fill} min={0} max={3} step={0.01} on={(v) => setTx("fill", v)} />
+              <Slide label="Rim" v={tx.rim} min={0} max={6} step={0.01} on={(v) => setTx("rim", v)} />
+              <Slide label="Key angle" v={tx.keyAngle} min={0} max={360} step={1} fmt={(v) => v + "\u00b0"} on={(v) => setTx("keyAngle", v)} />
+              <Slide label="Contact shadow" v={tx.shadow} min={0} max={1} step={0.01} on={(v) => setTx("shadow", v)} />
+              <Slide label="Exposure" v={tx.exposure} min={0.1} max={3} step={0.01} on={(v) => setTx("exposure", v)} />
+            </div>
+
+            <div className="grp">
+              <h3>Form</h3>
+              <Slide label="Scale" v={tx.scale} min={0.2} max={4} step={0.01} on={(v) => setTx("scale", v)} />
+              <Slide label="Height" v={tx.height} min={-2} max={2} step={0.01} on={(v) => setTx("height", v)} />
+              <Slide label="Distance" v={tx.zoom} min={1.4} max={14} step={0.05} on={(v) => setTx("zoom", v)} />
+              <Slide label="Spin" v={tx.spin} min={-2} max={2} step={0.01} fmt={(v) => v.toFixed(2) + " r/s"} on={(v) => setTx("spin", v)} />
+            </div>
+
+            <div className="grp">
+              <h3>Send it elsewhere</h3>
+              <div className="chips">
+                {[["points", "Points"], ["voxel", "Voxel"], ["wire", "Wire"], ["ascii", "ASCII"], ["dither", "Dither"], ["studio", "Studio"]].map(([k, l]) => (
+                  <button key={k} className="chip" onClick={() => setSection(k)}>{l}</button>
+                ))}
+              </div>
+              <p className="hint">
+                The words are real geometry, so every other mode treats them exactly like an
+                uploaded model \u2014 including the plotter export.
+              </p>
+            </div>
+
+            <div className="grp">
+              <h3>Export</h3>
+              <div className="exports">
+                <button className="btn wide" onClick={exportScenePNG}>PNG</button>
+                <button className="btn wide" onClick={recordLoop} disabled={recording || seq.busy}>
+                  {recording ? `Recording ${tl.duration}s\u2026` : `Record ${tl.duration}s \u00b7 ${exp.height === 2160 ? "4K" : exp.height + "p"}`}
+                </button>
+                <button className="btn wide" onClick={() => exportSequence(24, true)} disabled={seq.busy || recording}>
+                  {seq.busy ? `Rendering ${seq.done}/${seq.total}` : "PNG sequence \u00b7 alpha"}
+                </button>
+                <button className="btn wide" onClick={() => setTxRaw(TX_DEFAULTS)}>Reset text</button>
+              </div>
             </div>
           </div>
         )}
