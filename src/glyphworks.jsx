@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import * as THREE from "three";
+import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 
 /* ============================================================
    GLB parsing — self-contained. No GLTFLoader dependency.
@@ -2711,9 +2712,114 @@ function plotterSVG(paths, cfg, aspect) {
 }
 
 
+
+/* ============================================================
+   Studio — a properly lit render. Image-based lighting is what
+   separates "a model with a lamp on it" from something that reads
+   as a render, and it only became reachable once the project moved
+   to a bundler.
+   ============================================================ */
+
+const ST_DEFAULTS = {
+  material: "original",
+  env: "studio",
+  envPower: 1,
+  showEnv: false,
+  roughness: 0.35,
+  metalness: 0.1,
+  tint: "#D9DEE6",
+  key: 2.2,
+  fill: 0.5,
+  rim: 1.6,
+  keyAngle: 40,
+  shadow: 0.5,
+  exposure: 1,
+  tone: "aces",
+  bg: "#0A0C10",
+  spin: 0.3,
+  zoom: 3.6,
+  scale: 1,
+  height: 0,
+};
+
+const MATERIALS = [
+  ["original", "Model"], ["clay", "Clay"], ["chrome", "Chrome"],
+  ["glass", "Glass"], ["toon", "Toon"], ["xray", "X-ray"], ["wireframe", "Wire"],
+];
+const TONES = [["none", "Off"], ["aces", "Filmic"], ["reinhard", "Soft"], ["cineon", "Cineon"]];
+const ENV_POWER = { studio: 1, sunset: 0.8, night: 0.3, white: 1.5 };
+const ENV_TINT = { studio: 0xffffff, sunset: 0xffb27a, night: 0x7f93ff, white: 0xffffff };
+
+// Generating the environment map is expensive, so build it once and keep it.
+function studioEnv(E) {
+  if (E.envMap) return E.envMap;
+  const pmrem = new THREE.PMREMGenerator(E.renderer);
+  const room = new RoomEnvironment();
+  E.envMap = pmrem.fromScene(room, 0.04).texture;
+  if (room.dispose) room.dispose();
+  pmrem.dispose();
+  return E.envMap;
+}
+
+function studioMaterial(kind, cfg, info) {
+  const tint = new THREE.Color(cfg.tint);
+  if (kind === "clay")
+    return new THREE.MeshStandardMaterial({ color: tint, roughness: 0.92, metalness: 0, side: THREE.DoubleSide });
+  if (kind === "chrome")
+    return new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.05, metalness: 1, envMapIntensity: 1.7, side: THREE.DoubleSide });
+  if (kind === "glass")
+    return new THREE.MeshPhysicalMaterial({
+      color: tint, roughness: 0.05, metalness: 0, transmission: 0.95,
+      thickness: 0.7, ior: 1.45, transparent: true, side: THREE.DoubleSide,
+    });
+  if (kind === "toon")
+    return new THREE.MeshToonMaterial({ color: tint, side: THREE.DoubleSide });
+  if (kind === "xray")
+    return new THREE.MeshBasicMaterial({
+      color: tint, transparent: true, opacity: 0.3,
+      blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+    });
+  if (kind === "wireframe")
+    return new THREE.MeshBasicMaterial({ color: tint, wireframe: true, side: THREE.DoubleSide });
+  return new THREE.MeshStandardMaterial({
+    color: info ? info.color : new THREE.Color(0xffffff),
+    map: info ? info.map : null,
+    normalMap: info ? info.normalMap : null,
+    emissiveMap: info ? info.emissiveMap : null,
+    emissive: info ? info.emissive : new THREE.Color(0),
+    roughness: cfg.roughness,
+    metalness: cfg.metalness,
+    side: THREE.DoubleSide,
+  });
+}
+
+function applyStudio(E, cfg) {
+  const root = E.content;
+  if (!root) return;
+  const env = studioEnv(E);
+  root.traverse((o) => {
+    if (!o.isMesh) return;
+    if (!o.userData.studio || o.userData.studioKind !== cfg.material) {
+      if (o.userData.studio) o.userData.studio.dispose();
+      o.userData.studio = studioMaterial(cfg.material, cfg, o.userData.info);
+      o.userData.studioKind = cfg.material;
+    }
+    const m = o.userData.studio;
+    if (m.envMap !== undefined) m.envMap = env;
+    if ("envMapIntensity" in m) m.envMapIntensity = cfg.envPower * (ENV_POWER[cfg.env] || 1);
+    if (cfg.material === "original") {
+      m.roughness = cfg.roughness;
+      m.metalness = cfg.metalness;
+    }
+    o.castShadow = true;
+    o.receiveShadow = true;
+    o.material = m;
+  });
+}
+
 const SRC_DEFAULTS = { kind: "model", fit: "cover", mirror: true, cut: 0.06, name: "" };
 
-const BUILD = "v44";
+const BUILD = "v45 · studio";
 const MONO = '"IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
 
 /* ============================================================
@@ -2735,6 +2841,7 @@ export default function Glyphworks() {
   const [src, setSrc] = useState(SRC_DEFAULTS);
   const [hc, setHc] = useState(HC_DEFAULTS);
   const [plot, setPlot] = useState(PLOT_DEFAULTS);
+  const [st, setSt] = useState(ST_DEFAULTS);
   const [plotInfo, setPlotInfo] = useState(null);
   const [handSeen, setHandSeen] = useState(false);
   const [handStatus, setHandStatus] = useState("idle");
@@ -2771,6 +2878,7 @@ export default function Glyphworks() {
   const expRef = useRef(exp);
   const srcRef = useRef(src);
   const hcRef = useRef(hc);
+  const stRef = useRef(st);
   const handCvRef = useRef(null);
   const mdRef = useRef(md);
   const clRef = useRef(cl);
@@ -2808,6 +2916,7 @@ export default function Glyphworks() {
   expRef.current = exp;
   srcRef.current = src;
   hcRef.current = hc;
+  stRef.current = st;
   mdRef.current = md;
   clRef.current = cl;
 
@@ -2828,13 +2937,14 @@ export default function Glyphworks() {
   const setM = (k, v) => setMd((p) => ({ ...p, [k]: v }));
   const setH = (k, v) => setHc((p) => ({ ...p, [k]: v }));
   const setPl = (k, v) => setPlot((p) => ({ ...p, [k]: v }));
+  const setSt2 = (k, v) => setSt((p) => ({ ...p, [k]: v }));
   const setC = (k, v) => setCl((p) => ({ ...p, [k]: v }));
   const refFor = (sec) =>
     sec === "ascii" ? sRef : sec === "dither" ? dtRef : sec === "points" ? pcRef : sec === "voxel" ? vxRef : wfRef;
   const setterFor = (sec) =>
     sec === "ascii" ? setS : sec === "dither" ? setDt : sec === "points" ? setPc : sec === "voxel" ? setVx : setWf;
   const cfgFor = (sec) =>
-    sec === "points" ? pcRef.current : sec === "voxel" ? vxRef.current : sec === "wire" ? wfRef.current : dtRef.current;
+    sec === "points" ? pcRef.current : sec === "voxel" ? vxRef.current : sec === "wire" ? wfRef.current : sec === "studio" ? stRef.current : dtRef.current;
 
   const flash = (msg) => {
     setToast(msg);
@@ -2844,6 +2954,8 @@ export default function Glyphworks() {
   /* ---- engine boot ---- */
   useEffect(() => {
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     renderer.setClearColor(0x000000, 0);
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(42, 1, 0.05, 200);
@@ -2856,11 +2968,32 @@ export default function Glyphworks() {
     fill.position.set(-3, -1, 2);
     scene.add(ambient, key, fill);
 
+    // Studio rig, dormant until that section is opened.
+    const stKey = new THREE.DirectionalLight(0xffffff, 0);
+    stKey.castShadow = true;
+    stKey.shadow.mapSize.set(1024, 1024);
+    stKey.shadow.camera.near = 0.1;
+    stKey.shadow.camera.far = 24;
+    stKey.shadow.camera.left = -3; stKey.shadow.camera.right = 3;
+    stKey.shadow.camera.top = 3; stKey.shadow.camera.bottom = -3;
+    stKey.shadow.bias = -0.0012;
+    const stFill = new THREE.DirectionalLight(0xffffff, 0);
+    const stRim = new THREE.DirectionalLight(0xffffff, 0);
+    const floor = new THREE.Mesh(
+      new THREE.PlaneGeometry(30, 30),
+      new THREE.ShadowMaterial({ opacity: 0, transparent: true })
+    );
+    floor.rotation.x = -Math.PI / 2;
+    floor.receiveShadow = true;
+    floor.visible = false;
+    scene.add(stKey, stFill, stRim, floor);
+
     const depthMat = new THREE.MeshDepthMaterial();
     const normalMat = new THREE.MeshNormalMaterial({ side: THREE.DoubleSide });
 
     if (glRef.current) glRef.current.appendChild(renderer.domElement);
     engine.current = { renderer, scene, camera, pivot, ambient, key, fill, depthMat, normalMat,
+      stKey, stFill, stRim, floor, envMap: null,
       cap: 0, capApplied: 0, bgOver: null, capturing: false, src: null, scv: null,
       mpts: null, mjit: null, mcv: null, mgrid: "",
       rt: null, rtC: null, buf: null, bufC: null, content: null,
@@ -2936,7 +3069,8 @@ export default function Glyphworks() {
         const spin = sec === "ascii" ? sRef.current.spin : cfgFor(sec).spin;
         if (!orbit.current.dragging) orbit.current.yaw += spin * dt;
       }
-      if (sec === "collage") drawCollage();
+      if (sec === "studio") drawStudio();
+      else if (sec === "collage") drawCollage();
       else if (sec === "media") drawMedia();
       else if (sec === "ascii") draw(dt);
       else if (sec === "dither") drawDither();
@@ -3490,6 +3624,94 @@ export default function Glyphworks() {
       setStats((p) => ({ ...p, cols, rows }));
     }
   }, []);
+
+  const drawStudio = useCallback(() => {
+    const E = engine.current, host = viewRef.current;
+    if (!E || !host) return;
+    const cfg = stRef.current;
+    const W = host.clientWidth, H = host.clientHeight;
+    if (W < 8 || H < 8) return;
+    if (E.vw !== W || E.vh !== H || E.capApplied !== E.cap) {
+      E.capApplied = E.cap;
+      if (E.cap) {
+        let pw = Math.floor(W * E.cap), ph = Math.floor(H * E.cap);
+        pw -= pw % 2; ph -= ph % 2;
+        E.renderer.setPixelRatio(1);
+        E.renderer.setSize(pw, ph, false);
+      } else {
+        E.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+        E.renderer.setSize(W, H, false);
+      }
+      E.vw = W; E.vh = H;
+    }
+
+    const env = studioEnv(E);
+    E.scene.environment = env;
+    E.scene.background = cfg.showEnv ? env : null;
+    E.renderer.toneMapping =
+      cfg.tone === "aces" ? THREE.ACESFilmicToneMapping :
+      cfg.tone === "reinhard" ? THREE.ReinhardToneMapping :
+      cfg.tone === "cineon" ? THREE.CineonToneMapping : THREE.NoToneMapping;
+    E.renderer.toneMappingExposure = cfg.exposure;
+    E.renderer.setClearColor(new THREE.Color(E.bgOver || cfg.bg), E.alpha ? 0 : 1);
+
+    // the ASCII rig must not double up on the studio rig
+    E.ambient.intensity = 0;
+    E.key.intensity = 0;
+    E.fill.intensity = 0;
+    const a = (cfg.keyAngle * Math.PI) / 180;
+    E.stKey.intensity = cfg.key;
+    E.stKey.position.set(Math.cos(a) * 5, 4.5, Math.sin(a) * 5);
+    E.stFill.intensity = cfg.fill;
+    E.stFill.position.set(-Math.cos(a) * 4, 1.5, -Math.sin(a) * 3);
+    E.stRim.intensity = cfg.rim;
+    E.stRim.position.set(-Math.cos(a) * 3, 2.5, -Math.sin(a) * 6);
+    E.floor.visible = cfg.shadow > 0.01;
+    E.floor.material.opacity = cfg.shadow;
+    E.floor.position.y = -1.02 * cfg.scale + cfg.height;
+
+    E.pivot.rotation.set(orbit.current.pitch, orbit.current.yaw, 0);
+    E.pivot.scale.setScalar(cfg.scale);
+    E.pivot.position.y = cfg.height;
+    E.camera.aspect = W / H;
+    E.camera.position.set(0, 0.35, cfg.zoom);
+    E.camera.lookAt(0, 0, 0);
+    E.camera.updateProjectionMatrix();
+    E.scene.fog = null;
+    E.scene.overrideMaterial = null;
+    E.renderer.setRenderTarget(null);
+    E.renderer.render(E.scene, E.camera);
+  }, []);
+
+  // leaving Studio has to hand the scene back exactly as it was found
+  useEffect(() => {
+    const E = engine.current;
+    if (!E) return;
+    if (section === "studio") {
+      if (E.content) { E.content.visible = true; applyStudio(E, stRef.current); }
+      if (E.points) E.points.visible = false;
+      if (E.mpts) E.mpts.visible = false;
+      if (E.voxels) E.voxels.visible = false;
+      if (E.wire) E.wire.visible = false;
+      E.vw = 0;
+    } else {
+      E.scene.environment = null;
+      E.scene.background = null;
+      E.renderer.toneMapping = THREE.NoToneMapping;
+      E.renderer.toneMappingExposure = 1;
+      E.stKey.intensity = 0;
+      E.stFill.intensity = 0;
+      E.stRim.intensity = 0;
+      E.floor.visible = false;
+      if (E.content) applySurface(E.content, sRef.current);
+      E.vw = 0;
+    }
+  }, [section, modelName]);
+
+  useEffect(() => {
+    if (section !== "studio") return;
+    applyStudio(engine.current, st);
+  }, [section, modelName, st.material, st.tint, st.roughness, st.metalness, st.envPower, st.env]);
 
   /* ---- point cloud ---- */
   const draw3D = useCallback((cfg, kind) => {
@@ -4195,6 +4417,7 @@ export default function Glyphworks() {
       if (sec === "points") setPc(upd);
       else if (sec === "voxel") setVx(upd);
       else if (sec === "wire") setWf(upd);
+      else if (sec === "studio") setSt(upd);
       else if (sec === "dither") setDt(upd);
       else if (sec === "media") {
         setMd((p) => ({ ...p, zoom: Math.min(8, Math.max(0.15, p.zoom * (1 - e.deltaY * 0.0015))) }));
@@ -4376,7 +4599,8 @@ export default function Glyphworks() {
 
   const renderAt = (t, sec) => {
     applyTime(t);
-    if (sec === "collage") drawCollage();
+    if (sec === "studio") drawStudio();
+    else if (sec === "collage") drawCollage();
     else if (sec === "media") drawMedia();
     else if (sec === "ascii") draw(0);
     else if (sec === "dither") drawDither();
@@ -4901,7 +5125,7 @@ input[type=range]:focus-visible{outline:1px solid var(--accent);outline-offset:4
       <div className="bar">
         <div className="mark">GLYPH<span>WORKS</span></div>
         <div className="tabs">
-          {[["media", "Media"], ["collage", "Collage"], ["ascii", "ASCII"], ["dither", "Dither"], ["points", "Points"], ["voxel", "Voxel"], ["wire", "Wire"]].map(([k, l]) => (
+          {[["studio", "Studio"], ["media", "Media"], ["collage", "Collage"], ["ascii", "ASCII"], ["dither", "Dither"], ["points", "Points"], ["voxel", "Voxel"], ["wire", "Wire"]].map(([k, l]) => (
             <button key={k} className={section === k ? "on" : ""} onClick={() => setSection(k)}>{l}</button>
           ))}
         </div>
@@ -5224,6 +5448,99 @@ input[type=range]:focus-visible{outline:1px solid var(--accent);outline-offset:4
                 </button>
               </div>
               <p className="hint">PLY opens in Blender, CloudCompare, MeshLab, and Houdini.</p>
+            </div>
+          </div>
+        )}
+
+        {panelOpen && section === "studio" && (
+          <div className="rail">
+            <HandPanel />
+
+            <div className="grp">
+              <h3>Material</h3>
+              <div className="chips">
+                {MATERIALS.map(([k, l]) => (
+                  <button key={k} className={"chip" + (st.material === k ? " on" : "")} onClick={() => setSt2("material", k)}>{l}</button>
+                ))}
+              </div>
+              {st.material === "original" && (
+                <>
+                  <Slide label="Roughness" v={st.roughness} min={0} max={1} step={0.01} on={(v) => setSt2("roughness", v)} />
+                  <Slide label="Metalness" v={st.metalness} min={0} max={1} step={0.01} on={(v) => setSt2("metalness", v)} />
+                </>
+              )}
+              {st.material !== "original" && (
+                <div className="swatches">
+                  <Swatch label="Colour" value={st.tint} on={(v) => setSt2("tint", v)} />
+                  <Swatch label="Field" value={st.bg} on={(v) => setSt2("bg", v)} />
+                </div>
+              )}
+              <p className="hint">
+                Clay is what people reach for to present geometry. Chrome and glass show off the
+                environment rather than the model.
+              </p>
+            </div>
+
+            <div className="grp">
+              <h3>Environment</h3>
+              <div className="chips">
+                {Object.keys(ENV_POWER).map((k) => (
+                  <button key={k} className={"chip" + (st.env === k ? " on" : "")} onClick={() => setSt2("env", k)}>{k}</button>
+                ))}
+              </div>
+              <Slide label="Strength" v={st.envPower} min={0} max={3} step={0.01} on={(v) => setSt2("envPower", v)} />
+              <Toggle label="Show it behind the model" on={st.showEnv} set={(v) => setSt2("showEnv", v)} />
+              <p className="hint">
+                Light bounced from a whole room, not a few lamps. This is what makes metal read as
+                metal — nothing else in the app does more for how finished a render looks.
+              </p>
+            </div>
+
+            <div className="grp">
+              <h3>Light</h3>
+              <Slide label="Key" v={st.key} min={0} max={6} step={0.01} on={(v) => setSt2("key", v)} />
+              <Slide label="Fill" v={st.fill} min={0} max={3} step={0.01} on={(v) => setSt2("fill", v)} />
+              <Slide label="Rim" v={st.rim} min={0} max={6} step={0.01} on={(v) => setSt2("rim", v)} />
+              <Slide label="Key angle" v={st.keyAngle} min={0} max={360} step={1} fmt={(v) => v + "\u00b0"} on={(v) => setSt2("keyAngle", v)} />
+              <Slide label="Contact shadow" v={st.shadow} min={0} max={1} step={0.01} on={(v) => setSt2("shadow", v)} />
+              <p className="hint">A shadow underneath does more for a render feeling finished than any other single control.</p>
+            </div>
+
+            <div className="grp">
+              <h3>Look</h3>
+              <div className="seg">
+                {TONES.map(([k, l]) => (
+                  <button key={k} className={st.tone === k ? "on" : ""} onClick={() => setSt2("tone", k)}>{l}</button>
+                ))}
+              </div>
+              <Slide label="Exposure" v={st.exposure} min={0.1} max={3} step={0.01} on={(v) => setSt2("exposure", v)} />
+              <div className="swatches">
+                <Swatch label="Field" value={st.bg} on={(v) => setSt2("bg", v)} />
+              </div>
+              <p className="hint">Filmic rolls off highlights instead of clipping them, which is why renders look photographic rather than blown out.</p>
+            </div>
+
+            <div className="grp">
+              <h3>Form</h3>
+              <Slide label="Scale" v={st.scale} min={0.2} max={4} step={0.01} on={(v) => setSt2("scale", v)} />
+              <Slide label="Height" v={st.height} min={-2} max={2} step={0.01} on={(v) => setSt2("height", v)} />
+              <Slide label="Distance" v={st.zoom} min={1.4} max={14} step={0.05} on={(v) => setSt2("zoom", v)} />
+              <Slide label="Spin" v={st.spin} min={-2} max={2} step={0.01} fmt={(v) => v.toFixed(2) + " r/s"} on={(v) => setSt2("spin", v)} />
+              <p className="hint">Drag to orbit, scroll to push the camera.</p>
+            </div>
+
+            <div className="grp">
+              <h3>Export</h3>
+              <div className="exports">
+                <button className="btn wide" onClick={exportScenePNG}>PNG</button>
+                <button className="btn wide" onClick={recordLoop} disabled={recording || seq.busy}>
+                  {recording ? `Recording ${tl.duration}s\u2026` : `Record ${tl.duration}s \u00b7 ${exp.height === 2160 ? "4K" : exp.height + "p"}`}
+                </button>
+                <button className="btn wide" onClick={() => exportSequence(24, true)} disabled={seq.busy || recording || liveSource}>
+                  {seq.busy ? `Rendering ${seq.done}/${seq.total}` : "PNG sequence \u00b7 alpha"}
+                </button>
+                <button className="btn wide" onClick={() => setSt(ST_DEFAULTS)}>Reset studio</button>
+              </div>
             </div>
           </div>
         )}
