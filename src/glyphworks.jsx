@@ -790,8 +790,8 @@ const ANIM = {
   points: { num: ["size","opacity","scatter","zoom","scale","height"], col: ["bg"] },
   voxel:  { num: ["scatter","ambient","key","zoom","scale","height"], col: ["bg"] },
   wire:   { num: ["opacity","fog","zoom","scale","height"], col: ["color","bg"] },
-  studio: { num: ["key","fill","rim","keyAngle","exposure","envPower","roughness","metalness","shadow","zoom","scale","height"], col: ["tint","bg"] },
-  text:   { num: ["key","fill","rim","keyAngle","exposure","envPower","shadow","zoom","scale","height"], col: ["tint","bg"] },
+  studio: { num: ["key","fill","rim","keyAngle","exposure","envPower","roughness","metalness","shadow","fieldAmount","fieldScale","fieldSpeed","zoom","scale","height"], col: ["tint","bg"] },
+  text:   { num: ["key","fill","rim","keyAngle","exposure","envPower","shadow","fieldAmount","fieldScale","fieldSpeed","zoom","scale","height"], col: ["tint","bg"] },
 };
 
 /* ============================================================
@@ -2843,6 +2843,7 @@ function plotterSVG(paths, cfg, aspect) {
    ============================================================ */
 
 const ST_DEFAULTS = {
+  field: "none", fieldAmount: 0.12, fieldScale: 3, fieldSpeed: 1,
   material: "original",
   env: "studio",
   envPower: 1,
@@ -2917,13 +2918,14 @@ function studioMaterial(kind, cfg, info) {
 
 function applyStudio(E, cfg) {
   const root = E.content;
+  E.dispU.length = 0;
   if (!root) return;
   const env = studioEnv(E);
   root.traverse((o) => {
     if (!o.isMesh) return;
     if (!o.userData.studio || o.userData.studioKind !== cfg.material) {
       if (o.userData.studio) o.userData.studio.dispose();
-      o.userData.studio = studioMaterial(cfg.material, cfg, o.userData.info);
+      o.userData.studio = attachDisplace(studioMaterial(cfg.material, cfg, o.userData.info), E.dispU);
       o.userData.studioKind = cfg.material;
     }
     const m = o.userData.studio;
@@ -2954,11 +2956,11 @@ const FONTS = {
   "helvetiker bold": ["Helvetiker Bold", "helvetiker_bold"],
   optimer: ["Optimer", "optimer_regular"],
   "optimer bold": ["Optimer Bold", "optimer_bold"],
-  gentilis: ["Gentilis", "gentilis_regular"],
-  "gentilis bold": ["Gentilis Bold", "gentilis_bold"],
 };
 
 const TX_DEFAULTS = {
+  field: "none", fieldAmount: 0.12, fieldScale: 3, fieldSpeed: 1,
+  physics: false, gravity: 9.8, bounce: 0.42, floor: -1, spread: 1.6, drop: 0,
   text: "GLYPH\nWORKS",
   font: "helvetiker bold",
   depth: 0.28,
@@ -3067,9 +3069,176 @@ function buildText(cfg, font) {
   return { group: fitToUnitBox(group), tris: Math.round(tris) };
 }
 
+
+/* ============================================================
+   Displacement — the surface itself moves, driven on the GPU so it
+   costs nothing regardless of triangle count. Patched into whatever
+   material is in use rather than replacing it.
+   ============================================================ */
+
+const FIELDS_LIST = [
+  ["none", "Off"], ["wave", "Wave"], ["ripple", "Ripple"], ["twist", "Twist"],
+  ["bulge", "Breathe"], ["noise", "Noise"], ["jitter", "Jitter"], ["shear", "Shear"],
+];
+const FIELD_ID = { none: 0, wave: 1, ripple: 2, twist: 3, bulge: 4, noise: 5, jitter: 6, shear: 7 };
+
+const DISPLACE_CHUNK = `
+  float dHash(vec3 p) {
+    return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453);
+  }
+  float dNoise(vec3 p) {
+    vec3 i = floor(p), f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    float n = mix(
+      mix(mix(dHash(i), dHash(i + vec3(1,0,0)), f.x),
+          mix(dHash(i + vec3(0,1,0)), dHash(i + vec3(1,1,0)), f.x), f.y),
+      mix(mix(dHash(i + vec3(0,0,1)), dHash(i + vec3(1,0,1)), f.x),
+          mix(dHash(i + vec3(0,1,1)), dHash(i + vec3(1,1,1)), f.x), f.y), f.z);
+    return n * 2.0 - 1.0;
+  }
+  vec3 displace(vec3 p, vec3 n) {
+    if (uMode == 0 || uAmp <= 0.0001) return p;
+    float t = uTime * uSpeed;
+    if (uMode == 1) {           // wave
+      p.y += sin(p.x * uFreq + t) * uAmp;
+      p.z += cos(p.x * uFreq * 0.7 + t) * uAmp * 0.4;
+    } else if (uMode == 2) {    // ripple
+      float r = length(p.xz);
+      p.y += sin(r * uFreq - t * 2.0) * uAmp;
+    } else if (uMode == 3) {    // twist
+      float a = p.y * uFreq * 0.5 + t * 0.4;
+      float c = cos(a), s = sin(a);
+      p.xz = mat2(c, -s, s, c) * p.xz * (1.0 + uAmp * 0.0);
+      p.xz *= 1.0 + uAmp * 0.15 * sin(t);
+    } else if (uMode == 4) {    // breathe
+      p += n * (0.5 + 0.5 * sin(t)) * uAmp;
+    } else if (uMode == 5) {    // noise
+      p += n * dNoise(p * uFreq + vec3(0.0, t * 0.3, 0.0)) * uAmp;
+    } else if (uMode == 6) {    // jitter
+      p += (vec3(dHash(p * 91.7 + floor(t * 12.0)),
+                 dHash(p * 41.3 + floor(t * 12.0) + 7.0),
+                 dHash(p * 63.1 + floor(t * 12.0) + 13.0)) - 0.5) * uAmp;
+    } else if (uMode == 7) {    // shear
+      p.x += p.y * sin(t) * uAmp;
+      p.z += p.y * cos(t * 0.8) * uAmp * 0.6;
+    }
+    return p;
+  }
+`;
+
+// Patched onto an existing material so the surface still shades correctly.
+function attachDisplace(mat, store) {
+  if (!mat || mat.userData.displaced) return mat;
+  mat.userData.displaced = true;
+  mat.onBeforeCompile = (shader) => {
+    shader.uniforms.uTime = { value: 0 };
+    shader.uniforms.uAmp = { value: 0 };
+    shader.uniforms.uFreq = { value: 3 };
+    shader.uniforms.uSpeed = { value: 1 };
+    shader.uniforms.uMode = { value: 0 };
+    shader.vertexShader =
+      "uniform float uTime;\nuniform float uAmp;\nuniform float uFreq;\nuniform float uSpeed;\nuniform int uMode;\n" +
+      DISPLACE_CHUNK +
+      shader.vertexShader.replace(
+        "#include <begin_vertex>",
+        "#include <begin_vertex>\n  transformed = displace(transformed, objectNormal);"
+      );
+    store.push(shader.uniforms);
+  };
+  mat.needsUpdate = true;
+  return mat;
+}
+
+function pushDisplace(store, cfg, time) {
+  const mode = FIELD_ID[cfg.field] || 0;
+  for (const u of store) {
+    u.uTime.value = time;
+    u.uAmp.value = mode ? cfg.fieldAmount : 0;
+    u.uFreq.value = cfg.fieldScale;
+    u.uSpeed.value = cfg.fieldSpeed;
+    u.uMode.value = mode;
+  }
+}
+
+/* ============================================================
+   Physics — letters as rigid bodies. Stepped from an absolute time
+   rather than frame to frame, so a recording reproduces exactly.
+   ============================================================ */
+
+const PHYS_DT = 1 / 120;
+
+function physReset(bodies, meshes) {
+  bodies.length = 0;
+  for (const m of meshes) {
+    m.updateMatrixWorld(true);
+    const box = new THREE.Box3().setFromObject(m);
+    const c = box.getCenter(new THREE.Vector3());
+    const sz = box.getSize(new THREE.Vector3());
+    bodies.push({
+      mesh: m,
+      home: m.position.clone(),
+      pos: c.clone(),
+      vel: new THREE.Vector3(),
+      spin: new THREE.Vector3(),
+      rot: new THREE.Euler(),
+      r: Math.max(0.08, Math.max(sz.x, sz.y, sz.z) * 0.42),
+      asleep: false,
+    });
+  }
+}
+
+function physStep(bodies, cfg, dt) {
+  const floor = cfg.floor;
+  const g = cfg.gravity;
+  for (const b of bodies) {
+    if (b.asleep) continue;
+    b.vel.y -= g * dt;
+    b.pos.addScaledVector(b.vel, dt);
+    b.rot.x += b.spin.x * dt;
+    b.rot.y += b.spin.y * dt;
+    b.rot.z += b.spin.z * dt;
+
+    if (b.pos.y - b.r < floor) {
+      b.pos.y = floor + b.r;
+      if (Math.abs(b.vel.y) < 0.35) {
+        b.vel.y = 0;
+        b.vel.multiplyScalar(0.82);
+        b.spin.multiplyScalar(0.82);
+        if (b.vel.lengthSq() < 0.0009 && b.spin.lengthSq() < 0.0009) b.asleep = true;
+      } else {
+        b.vel.y = -b.vel.y * cfg.bounce;
+        b.vel.x *= 0.92;
+        b.vel.z *= 0.92;
+        b.spin.multiplyScalar(0.9);
+      }
+    }
+  }
+  // letters push each other apart rather than passing through
+  for (let i = 0; i < bodies.length; i++)
+    for (let j = i + 1; j < bodies.length; j++) {
+      const a = bodies[i], b = bodies[j];
+      const dx = b.pos.x - a.pos.x, dy = b.pos.y - a.pos.y, dz = b.pos.z - a.pos.z;
+      const d2 = dx * dx + dy * dy + dz * dz;
+      const min = a.r + b.r;
+      if (d2 >= min * min || d2 < 1e-9) continue;
+      const d = Math.sqrt(d2);
+      const push = (min - d) * 0.5;
+      const nx = dx / d, ny = dy / d, nz = dz / d;
+      a.pos.x -= nx * push; a.pos.y -= ny * push; a.pos.z -= nz * push;
+      b.pos.x += nx * push; b.pos.y += ny * push; b.pos.z += nz * push;
+      const rel = (b.vel.x - a.vel.x) * nx + (b.vel.y - a.vel.y) * ny + (b.vel.z - a.vel.z) * nz;
+      if (rel < 0) {
+        const imp = -rel * (1 + cfg.bounce) * 0.5;
+        a.vel.x -= nx * imp; a.vel.y -= ny * imp; a.vel.z -= nz * imp;
+        b.vel.x += nx * imp; b.vel.y += ny * imp; b.vel.z += nz * imp;
+        a.asleep = false; b.asleep = false;
+      }
+    }
+}
+
 const SRC_DEFAULTS = { kind: "model", fit: "cover", mirror: true, cut: 0.06, name: "" };
 
-const BUILD = "v47.1 · text";
+const BUILD = "v48 · physics";
 const MONO = '"IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
 
 /* ============================================================
@@ -3248,6 +3417,7 @@ export default function Glyphworks() {
     if (glRef.current) glRef.current.appendChild(renderer.domElement);
     engine.current = { renderer, scene, camera, pivot, ambient, key, fill, depthMat, normalMat,
       stKey, stFill, stRim, floor, envMap: null,
+      dispU: [], bodies: [], simT: 0, physOn: false,
       cap: 0, capApplied: 0, bgOver: null, capturing: false, src: null, scv: null,
       mpts: null, mjit: null, mcv: null, mgrid: "",
       rt: null, rtC: null, buf: null, bufC: null, content: null,
@@ -3274,6 +3444,7 @@ export default function Glyphworks() {
       }
       if (engine.current && engine.current.capturing) return;
       const sec = sectionRef.current;
+      engine.current.simT = (engine.current.simT || 0) + dt;
       const hcCfg = hcRef.current;
       if (hcCfg.on && !engine.current.capturing) {
         const st = readHand(engine.current, hcCfg);
@@ -3946,6 +4117,7 @@ export default function Glyphworks() {
     E.floor.material.opacity = cfg.shadow;
     E.floor.position.y = -1.02 * cfg.scale + cfg.height;
 
+    pushDisplace(E.dispU, cfg, E.simT);
     E.pivot.rotation.set(orbit.current.pitch, orbit.current.yaw, 0);
     E.pivot.scale.setScalar(cfg.scale);
     E.pivot.position.y = cfg.height;
@@ -3990,6 +4162,43 @@ export default function Glyphworks() {
     applyStudio(engine.current, st);
   }, [section, modelName, st.material, st.tint, st.roughness, st.metalness, st.envPower, st.env]);
 
+  // Stepped from an absolute time. Scrubbing backwards restarts the sim,
+  // so the same moment always looks the same — which is what recording needs.
+  const runPhysics = (E, cfg) => {
+    const meshes = [];
+    if (E.content) E.content.traverse((o) => { if (o.isMesh) meshes.push(o); });
+    if (!meshes.length) return;
+    if (!E.physOn || E.bodies.length !== meshes.length) {
+      physReset(E.bodies, meshes);
+      E.bodies.forEach((b, i) => {
+        const r = (n) => Math.sin(i * 12.9898 + n * 78.233) * 43758.5453 % 1;
+        b.vel.set(r(1) * cfg.spread, Math.abs(r(2)) * cfg.spread * 0.6, r(3) * cfg.spread);
+        b.spin.set(r(4) * 4, r(5) * 4, r(6) * 4);
+      });
+      E.physOn = true;
+      E.physT = 0;
+    }
+    const target = Math.max(0, E.simT - cfg.drop);
+    if (target < E.physT) {           // scrubbed backwards: start again
+      physReset(E.bodies, meshes);
+      E.bodies.forEach((b, i) => {
+        const r = (n) => Math.sin(i * 12.9898 + n * 78.233) * 43758.5453 % 1;
+        b.vel.set(r(1) * cfg.spread, Math.abs(r(2)) * cfg.spread * 0.6, r(3) * cfg.spread);
+        b.spin.set(r(4) * 4, r(5) * 4, r(6) * 4);
+      });
+      E.physT = 0;
+    }
+    let guard = 0;
+    while (E.physT < target && guard++ < 4000) {
+      physStep(E.bodies, cfg, PHYS_DT);
+      E.physT += PHYS_DT;
+    }
+    for (const b of E.bodies) {
+      b.mesh.position.copy(b.pos).sub(new THREE.Vector3(0, 0, 0));
+      b.mesh.rotation.copy(b.rot);
+    }
+  };
+
   const rebuildText = useCallback(async () => {
     const E = engine.current;
     const cfg = txRef.current;
@@ -4006,6 +4215,8 @@ export default function Glyphworks() {
     // dropped in as the scene's model, so points, voxels, wire and the plotter
     // all treat it as geometry with no special cases
     swap(built, cfg.text.replace(/\s+/g, " ").trim().slice(0, 24) || "text");
+    E.physOn = false;
+    E.bodies.length = 0;
     if (E.points) { E.pivot.remove(E.points); E.points.geometry.dispose(); E.points.material.dispose(); E.points = null; }
     if (E.voxels) { E.pivot.remove(E.voxels); E.voxels.geometry.dispose(); E.voxels.material.dispose(); E.voxels = null; }
     if (E.wire) { E.pivot.remove(E.wire); disposeWire(E.wire); E.wire = null; }
@@ -4049,6 +4260,8 @@ export default function Glyphworks() {
     E.floor.visible = cfg.shadow > 0.01;
     E.floor.material.opacity = cfg.shadow;
     E.floor.position.y = -1.05 * cfg.scale + cfg.height;
+    pushDisplace(E.dispU, cfg, E.simT);
+    if (cfg.physics) runPhysics(E, cfg);
     E.pivot.rotation.set(orbit.current.pitch, orbit.current.yaw, 0);
     E.pivot.scale.setScalar(cfg.scale);
     E.pivot.position.y = cfg.height;
@@ -4968,6 +5181,7 @@ export default function Glyphworks() {
   };
 
   const renderAt = (t, sec) => {
+    engine.current.simT = t;
     applyTime(t);
     if (sec === "text") drawText();
     else if (sec === "studio") drawStudio();
@@ -5254,6 +5468,28 @@ export default function Glyphworks() {
   const applyTheme = (k) => setS((p) => ({ ...p, ...THEMES[k] }));
 
   const ramp = (s.ramp === "custom" ? s.custom : RAMPS[s.ramp]) || RAMPS.standard;
+
+  const FieldPanel = ({ cfg, set }) => (
+    <div className="grp">
+      <h3>Displacement</h3>
+      <div className="chips">
+        {FIELDS_LIST.map(([k, l]) => (
+          <button key={k} className={"chip" + (cfg.field === k ? " on" : "")} onClick={() => set("field", k)}>{l}</button>
+        ))}
+      </div>
+      {cfg.field !== "none" && (
+        <>
+          <Slide label="Amount" v={cfg.fieldAmount} min={0} max={0.8} step={0.005} on={(v) => set("fieldAmount", v)} />
+          <Slide label="Scale" v={cfg.fieldScale} min={0.3} max={14} step={0.1} on={(v) => set("fieldScale", v)} />
+          <Slide label="Speed" v={cfg.fieldSpeed} min={0} max={5} step={0.05} on={(v) => set("fieldSpeed", v)} />
+        </>
+      )}
+      <p className="hint">
+        The surface itself moves, on the GPU, so it costs nothing whether the model has a thousand
+        triangles or a million. Amount and speed are keyframable.
+      </p>
+    </div>
+  );
 
   const MotionPanel = () => (
     <div className="grp">
@@ -5852,6 +6088,7 @@ input[type=range]:focus-visible{outline:1px solid var(--accent);outline-offset:4
         {panelOpen && section === "text" && (
           <div className="rail">
             <MotionPanel />
+            <FieldPanel cfg={tx} set={setTx} />
             <HandPanel />
 
             <div className="grp">
@@ -5935,6 +6172,29 @@ input[type=range]:focus-visible{outline:1px solid var(--accent);outline-offset:4
             </div>
 
             <div className="grp">
+              <h3>Physics</h3>
+              <Toggle label="Let the letters fall" on={tx.physics} set={(v) => setTx("physics", v)} />
+              {tx.physics && (
+                <>
+                  <Slide label="Gravity" v={tx.gravity} min={0} max={30} step={0.1} on={(v) => setTx("gravity", v)} />
+                  <Slide label="Bounce" v={tx.bounce} min={0} max={0.9} step={0.01} on={(v) => setTx("bounce", v)} />
+                  <Slide label="Throw" v={tx.spread} min={0} max={6} step={0.05} on={(v) => setTx("spread", v)} />
+                  <Slide label="Floor" v={tx.floor} min={-2.5} max={0.5} step={0.01} on={(v) => setTx("floor", v)} />
+                  <Slide label="Delay" v={tx.drop} min={0} max={4} step={0.05} fmt={(v) => v.toFixed(2) + "s"} on={(v) => setTx("drop", v)} />
+                  <button className="btn" style={{ width: "100%" }}
+                    onClick={() => { engine.current.physOn = false; engine.current.bodies.length = 0; }}>
+                    Drop again
+                  </button>
+                </>
+              )}
+              <p className="hint">
+                Each letter is its own body, with a floor and collisions between them. The
+                simulation runs from the timeline clock rather than frame to frame, so a recording
+                comes out identical every time.
+              </p>
+            </div>
+
+            <div className="grp">
               <h3>Send it elsewhere</h3>
               <div className="chips">
                 {[["points", "Points"], ["voxel", "Voxel"], ["wire", "Wire"], ["ascii", "ASCII"], ["dither", "Dither"], ["studio", "Studio"]].map(([k, l]) => (
@@ -5966,6 +6226,7 @@ input[type=range]:focus-visible{outline:1px solid var(--accent);outline-offset:4
         {panelOpen && section === "studio" && (
           <div className="rail">
             <MotionPanel />
+            <FieldPanel cfg={st} set={setSt2} />
             <HandPanel />
 
             <div className="grp">
